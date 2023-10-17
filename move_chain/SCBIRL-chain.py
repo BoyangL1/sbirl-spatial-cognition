@@ -301,7 +301,7 @@ class avril:
 
         Parameters
         ----------
-        iters: int, 1000
+        iters: int
             Number of training update steps (NOTE: Not epochs)
         batch_size: int, 64
             Batch size for stochastic optimisation
@@ -353,11 +353,11 @@ class avril:
             pickle.dump(params, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 if __name__ == "__main__":
-    path = f"./data/state_action_tuple.npy"
-    inputs,targets,a_dim, s_dim=loadTraj(path,None)
+    path = f'./data/before_migrt.json'
+    inputs,targets,a_dim, s_dim=loadTrajChain(path,None)
 
     model = avril(inputs, targets, s_dim, a_dim, state_only=True)
-    model.loadParams('./model/params.pickle')
+    # model.loadParams('./model/params.pickle')
 
     # NOTE: model train 
     model.train(iters=5000)
