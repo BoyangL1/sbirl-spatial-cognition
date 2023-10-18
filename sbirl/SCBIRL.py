@@ -357,7 +357,7 @@ if __name__ == "__main__":
     inputs,targets,a_dim, s_dim=loadTraj(path,None)
 
     model = avril(inputs, targets, s_dim, a_dim, state_only=True)
-    model.loadParams('./model/params.pickle')
+    # model.loadParams('./model/params.pickle')
 
     # NOTE: model train 
     model.train(iters=5000)

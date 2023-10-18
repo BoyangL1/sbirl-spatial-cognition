@@ -44,4 +44,6 @@ def loadTraj(traj_file,num_trajs=None):
 
 if __name__ == "__main__":
     path = f"./data/state_action_tuple.npy"
-    inputs,targets,a_dim=loadTraj(path,15)
+    inputs,targets,a_dim,_=loadTraj(path,15)
+    print(inputs.shape,targets.shape,a_dim)
+    print(targets)

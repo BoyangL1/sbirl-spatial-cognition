@@ -31,7 +31,7 @@ def encoder_model(inputs, layers=2, units=64, state_only=True, a_dim=None):
         a_dim (int, optional): The dimension of the action space (only needed if state_only is False). Defaults to None.
 
     Returns:
-        outputs posterior probabilities for a reward function. mean and log variance
+        outputs posterior probabilities for a reward function. mean and variance
     """    
     out_dim = 2
     if not state_only:
@@ -186,11 +186,22 @@ class avril:
         Returns:
             (int): reward value
         """        
-        mean, log_std = self.reward(state) # mean and log standard deviation
+        mean, log_variance = self.reward(state) # mean and log variance
         sample_size=1
-        sample_reward = onp.random.normal(mean, onp.abs(np.exp(log_std)), sample_size)
+        sample_reward = onp.random.normal(mean, onp.abs(np.exp(log_variance)), sample_size)
         return sample_reward
 
+    def QValue(self, state):
+        q_values = self.q_network.apply(
+            self.q_params,
+            self.key,
+            state,
+            self.a_dim,
+            self.decoder_layers,
+            self.decoder_units,
+        )
+        return state
+    
     def elbo(self, params, key, inputs, targets):
         """
         Method for calculating ELBO
@@ -301,7 +312,7 @@ class avril:
 
         Parameters
         ----------
-        iters: int
+        iters: int, 1000
             Number of training update steps (NOTE: Not epochs)
         batch_size: int, 64
             Batch size for stochastic optimisation
@@ -352,21 +363,53 @@ class avril:
             print("save params to pickle!")
             pickle.dump(params, f, protocol=pickle.HIGHEST_PROTOCOL)
 
+def computeRewardOrValue(model, input_path, output_path, attribute_type='value'):
+    """
+    Compute rewards or state values for each state using a given model and save to a CSV file.
+
+    Parameters:
+    - model: The trained model. Should have a method `rewardValue` for computing rewards and `QValue` for computing Q values.
+    - input_path (str): Path to the input CSV file containing states.
+    - output_path (str): Path to save the output CSV file with computed attributes (rewards or state values).
+    - attribute_type (str): Either 'value' to compute state values or 'reward' to compute rewards.
+
+    Returns:
+    None. Writes results to the specified output CSV file.
+    """
+    
+    state_attribute = pd.read_csv(input_path)
+    state_attribute[attribute_type] = 0
+
+    if attribute_type == 'value':
+        for index, row in tqdm(state_attribute.iterrows(), total=len(state_attribute)):
+            state = np.array(row.values[1:31])
+            q_values = model.QValue(state)
+            state_attribute.iloc[index, -1] = np.max(q_values)
+    elif attribute_type == 'reward':
+        for index, row in tqdm(state_attribute.iterrows(), total=len(state_attribute)):
+            state = np.array(row.values[1:31])
+            r = sum(np.abs(model.rewardValue(state)) for _ in range(10)) / 10
+            state_attribute.iloc[index, -1] = r[0]
+    else:
+        raise ValueError("attribute_type should be either 'value' or 'reward'.")
+
+    state_attribute.to_csv(output_path, index=False)
+
+
+
+
+
 if __name__ == "__main__":
     path = f'./data/before_migrt.json'
-    inputs,targets,a_dim, s_dim=loadTrajChain(path,None)
-
+    full_traj_path = f'./data/all_traj.json'
+    inputs, targets, a_dim, s_dim =loadTrajChain(path,full_traj_path)
     model = avril(inputs, targets, s_dim, a_dim, state_only=True)
-    # model.loadParams('./model/params.pickle')
+    
+    model.loadParams('./model/params.pickle')
 
-    # NOTE: model train 
-    model.train(iters=5000)
+    # # NOTE: model train 
+    # model.train(iters=5000)
 
-    # NOTE: model reward
-    state_attribute=pd.read_excel('./data/SZ_tfidf.xlsx')
-    state_attribute['reward'] = 0
-    for index,row in tqdm(state_attribute.iterrows(), total=len(state_attribute)):
-        state = np.array(row.values[1:31])
-        r = np.abs(model.rewardValue(state))
-        state_attribute.iloc[index,-1] = r[0]
-    state_attribute.to_csv('./data/SZ_reward.csv')
+    # # NOTE: model reward or value
+    # computeRewardOrValue(model, './data/before_migrt_fnid.csv', './data/before_migrt_reward.csv', attribute_type='reward')
+    computeRewardOrValue(model, './data/all_traj_fnid.csv', './data/all_traj_value.csv', attribute_type='value')
