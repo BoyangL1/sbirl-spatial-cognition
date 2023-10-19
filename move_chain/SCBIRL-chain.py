@@ -4,6 +4,7 @@ from jax import random
 from jax.example_libraries import optimizers
 import jax
 import haiku as hk
+import os
 
 from tqdm import tqdm
 import numpy as onp
@@ -202,6 +203,11 @@ class avril:
         )
         return state
     
+    def modelSave(self,model_save_path):
+        with open(model_save_path,'wb') as f:
+            print("save params to {}!".format(model_save_path))
+            pickle.dump(self.params, f, protocol=pickle.HIGHEST_PROTOCOL)
+
     def elbo(self, params, key, inputs, targets):
         """
         Method for calculating ELBO
@@ -300,13 +306,13 @@ class avril:
         return neg_log_lik + kl + lambda_value*irl_loss
 
     def loadParams(self,model_path):
-        print("load params from pickle!")
+        print("load params from {}!".format(model_path))
         with open(model_path, 'rb') as f:
             self.params = pickle.load(f)     
             self.load_params = True
             self.pre_params = self.params
 
-    def train(self, iters: int = 1000, model_save_path: str='./model/params.pickle', batch_size: int = 64, l_rate: float = 1e-4):
+    def train(self, iters: int = 1000, batch_size: int = 64, l_rate: float = 1e-4):
         """
         Training function for the model.
 
@@ -359,9 +365,7 @@ class avril:
         self.e_params = params[0]
         self.q_params = params[1]
 
-        with open(model_save_path,'wb') as f:
-            print("save params to pickle!")
-            pickle.dump(params, f, protocol=pickle.HIGHEST_PROTOCOL)
+        self.params = params
 
 def computeRewardOrValue(model, input_path, output_path, attribute_type='value'):
     """
@@ -392,24 +396,87 @@ def computeRewardOrValue(model, input_path, output_path, attribute_type='value')
             state_attribute.iloc[index, -1] = r[0]
     else:
         raise ValueError("attribute_type should be either 'value' or 'reward'.")
+    
+    if output_path is not None:
+        state_attribute.to_csv(output_path, index=False)
+    
+    return
 
-    state_attribute.to_csv(output_path, index=False)
+def afterMigrt(after_migrt_file,input_path,output_path,model):
+    # load params from pre cognitive map
+    model.loadParams('./model/params.pickle')
+    # read traj chain file
+    with open(after_migrt_file, 'r') as file:
+        loaded_dicts_list1 = json.load(file)
+    traj_chains = [TravelData(**d) for d in loaded_dicts_list1]
 
+    state_attribute = pd.read_csv(input_path)
+    results_df = pd.DataFrame()
+    results_df['fnid'] = state_attribute['fnid']
+    pre_date = 0
 
+    for tc in traj_chains:
+        # Based on the travel chain of each day, update the model parameters.
+        date = tc.date
+        state_next_state = []
+        action_next_action = []
+        
+        for t in range(len(tc.travel_chain)-1):
+            s_n_s = onp.zeros((2, s_dim))
+            this_state,next_state=tc.travel_chain[t],tc.travel_chain[t+1]
+            row = state_attribute[state_attribute['fnid'] == this_state]
+            s_n_s[0, :] = np.array(row.values[0][1:31])
+            row = state_attribute[state_attribute['fnid'] == next_state]
+            s_n_s[1, :] = np.array(row.values[0][1:31])
+            state_next_state.append(s_n_s)
 
+            a_n_a = onp.zeros((2,1))
+            a_n_a[0] = tc.id_chain[t+1]
+            try:
+                a_n_a[1] = tc.id_chain[t+2]
+            except IndexError:
+                a_n_a[1] = -1 
+            action_next_action.append(a_n_a)
 
+        state_next_state = np.array(onp.array(state_next_state))
+        action_next_action = np.array(onp.array(action_next_action))
+        model.inputs = state_next_state        
+        model.targets = action_next_action
+
+        if pre_date != 0:
+            model_path = os.path.join("./data/after_migrt/model", f"{pre_date}.pickle")
+            model.loadParams(model_path)
+        model.train(iters=5000)
+        model_save_path = "./data/after_migrt/model/" +str(date)+".pickle"
+        model.modelSave(model_save_path)
+
+        reward_values = []
+        for index, row in tqdm(state_attribute.iterrows(), total=len(state_attribute)):
+            state = np.array(row.values[1:31])
+            r = sum(np.abs(model.rewardValue(state)) for _ in range(100)) / 100
+            reward_values.append(r[0])
+        results_df[str(date)] = reward_values
+
+        pre_date = date
+    results_df.to_csv(output_path)
 
 if __name__ == "__main__":
     path = f'./data/before_migrt.json'
     full_traj_path = f'./data/all_traj.json'
     inputs, targets, a_dim, s_dim =loadTrajChain(path,full_traj_path)
-    model = avril(inputs, targets, s_dim, a_dim, state_only=True)
-    
-    model.loadParams('./model/params.pickle')
+    model = avril(inputs, targets, s_dim, a_dim, state_only=True) # initialization
 
-    # # NOTE: model train 
-    # model.train(iters=5000)
+    # NOTE: model train 
+    model.train(iters=50000)
+    model_save_path = f'./model/params.pickle'
+    model.modelSave(model_save_path)
 
-    # # NOTE: model reward or value
-    # computeRewardOrValue(model, './data/before_migrt_fnid.csv', './data/before_migrt_reward.csv', attribute_type='reward')
-    computeRewardOrValue(model, './data/all_traj_fnid.csv', './data/all_traj_value.csv', attribute_type='value')
+    # NOTE: model reward before migration
+    computeRewardOrValue(model, './data/before_migrt_fnid.csv', './data/before_migrt_reward.csv', attribute_type='reward')
+    # computeRewardOrValue(model, './data/all_traj_fnid.csv', './data/all_traj_value.csv', attribute_type='value')
+
+    # NOTE: mode parameters after migration per day
+    after_migrt_file = f'./data/after_migrt.json'
+    input_path = './data/all_traj_fnid.csv'
+    output_path = './data/after_migrt/after_migrt_reward.csv'
+    afterMigrt(after_migrt_file,input_path,output_path,model)

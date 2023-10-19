@@ -14,7 +14,7 @@ def loadTrajChain(traj_file,full_traj_path, num_trajs=None):
     traj_chains = [TravelData(**d) for d in loaded_dicts_list1]
     
     all_chains = [TravelData(**d) for d in json.load(open(full_traj_path, 'r'))]
-    a_dim = len({id for tc in all_chains for id in tc.id_chain}) # action taken by all trajectory
+    a_dim = max({id for tc in all_chains for id in tc.id_chain})+1 # action taken by all trajectory
 
     if num_trajs is not None:
         traj_chains = traj_chains[:num_trajs]
