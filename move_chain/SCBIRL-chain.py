@@ -5,6 +5,7 @@ from jax.example_libraries import optimizers
 import jax
 import haiku as hk
 import os
+import pandas as pd
 
 from tqdm import tqdm
 import numpy as onp
@@ -364,7 +365,6 @@ class avril:
 
         self.e_params = params[0]
         self.q_params = params[1]
-
         self.params = params
 
 def computeRewardOrValue(model, input_path, output_path, attribute_type='value'):
@@ -381,102 +381,98 @@ def computeRewardOrValue(model, input_path, output_path, attribute_type='value')
     None. Writes results to the specified output CSV file.
     """
     
-    state_attribute = pd.read_csv(input_path)
-    state_attribute[attribute_type] = 0
+    # Using preprocessing function from utils
+    state_attribute, _ = preprocessStateAttributes('./data/before_migrt.json',input_path)
 
-    if attribute_type == 'value':
-        for index, row in tqdm(state_attribute.iterrows(), total=len(state_attribute)):
-            state = np.array(row.values[1:31])
-            q_values = model.QValue(state)
-            state_attribute.iloc[index, -1] = np.max(q_values)
-    elif attribute_type == 'reward':
-        for index, row in tqdm(state_attribute.iterrows(), total=len(state_attribute)):
-            state = np.array(row.values[1:31])
-            r = sum(np.abs(model.rewardValue(state)) for _ in range(10)) / 10
-            state_attribute.iloc[index, -1] = r[0]
-    else:
-        raise ValueError("attribute_type should be either 'value' or 'reward'.")
+    # Add a column for attribute_type
+    state_attribute[attribute_type] = 0.0
+
+    computeFunc = getComputeFunction(model, attribute_type)
     
+    for index, row in tqdm(state_attribute.iterrows(), total=len(state_attribute)):
+        state = np.array(row.values[1:-1])
+        state_attribute.iloc[index, -1] = float(computeFunc(state))
+        
     if output_path is not None:
         state_attribute.to_csv(output_path, index=False)
-    
     return
 
-def afterMigrt(after_migrt_file,input_path,output_path,model):
-    # load params from pre cognitive map
-    model.loadParams('./model/params.pickle')
-    # read traj chain file
-    with open(after_migrt_file, 'r') as file:
-        loaded_dicts_list1 = json.load(file)
-    traj_chains = [TravelData(**d) for d in loaded_dicts_list1]
+def getComputeFunction(model, attribute_type):
+    """Return the appropriate function to compute either 'value' or 'reward'."""
+    if attribute_type == 'value':
+        return lambda state: np.max(model.QValue(state))
+    elif attribute_type == 'reward':
+        return lambda state: sum(np.abs(model.rewardValue(state)) for _ in range(10)) / 10
+    else:
+        raise ValueError("attribute_type should be either 'value' or 'reward'.")
 
-    state_attribute = pd.read_csv(input_path)
+def afterMigrt(after_migrt_file, before_migrt_file, input_path, output_path, model):
+    model.loadParams('./model/params.pickle')
+    
+    # read before migration traj chain file using loadJsonFile
+    before_chains = loadJsonFile(before_migrt_file)
+    visited_state = {state for chain in before_chains for state in chain['travel_chain']}
+
+    # read after migration traj chain file using loadTravelDataFromDicts
+    loaded_dicts_list1 = loadJsonFile(after_migrt_file)
+    traj_chains = loadTravelDataFromDicts(loaded_dicts_list1)
+    
+    # Only keep the distance from home after migration
+    state_attribute, _ = preprocessStateAttributes(after_migrt_file,input_path)
+
     results_df = pd.DataFrame()
     results_df['fnid'] = state_attribute['fnid']
     pre_date = 0
 
     for tc in traj_chains:
-        # Based on the travel chain of each day, update the model parameters.
-        date = tc.date
-        state_next_state = []
-        action_next_action = []
-        
-        for t in range(len(tc.travel_chain)-1):
-            s_n_s = onp.zeros((2, s_dim))
-            this_state,next_state=tc.travel_chain[t],tc.travel_chain[t+1]
-            row = state_attribute[state_attribute['fnid'] == this_state]
-            s_n_s[0, :] = np.array(row.values[0][1:31])
-            row = state_attribute[state_attribute['fnid'] == next_state]
-            s_n_s[1, :] = np.array(row.values[0][1:31])
-            state_next_state.append(s_n_s)
+        state_next_state, action_next_action = processTrajectoryData([tc], state_attribute, model.s_dim)
 
-            a_n_a = onp.zeros((2,1))
-            a_n_a[0] = tc.id_chain[t+1]
-            try:
-                a_n_a[1] = tc.id_chain[t+2]
-            except IndexError:
-                a_n_a[1] = -1 
-            action_next_action.append(a_n_a)
+        visited_state.update(tc.travel_chain)
 
-        state_next_state = np.array(onp.array(state_next_state))
-        action_next_action = np.array(onp.array(action_next_action))
-        model.inputs = state_next_state        
-        model.targets = action_next_action
+        model.inputs = onp.array(state_next_state)
+        model.targets = onp.array(action_next_action)
 
-        if pre_date != 0:
+        if pre_date:
             model_path = os.path.join("./data/after_migrt/model", f"{pre_date}.pickle")
             model.loadParams(model_path)
         model.train(iters=5000)
-        model_save_path = "./data/after_migrt/model/" +str(date)+".pickle"
+        model_save_path = "./data/after_migrt/model/" + str(tc.date) + ".pickle"
         model.modelSave(model_save_path)
 
         reward_values = []
-        for index, row in tqdm(state_attribute.iterrows(), total=len(state_attribute)):
-            state = np.array(row.values[1:31])
-            r = sum(np.abs(model.rewardValue(state)) for _ in range(100)) / 100
-            reward_values.append(r[0])
-        results_df[str(date)] = reward_values
-
-        pre_date = date
+        for _, row in tqdm(state_attribute.iterrows(), total=len(state_attribute)):
+            if row.fnid in visited_state:
+                state = np.array(row.values[1:])
+                r = float(getComputeFunction(model, 'reward')(state))
+                reward_values.append(r)
+            else:
+                reward_values.append(0)
+        results_df[str(tc.date)] = reward_values
+        print(reward_values)
+        
+        pre_date = tc.date
+    
     results_df.to_csv(output_path)
 
 if __name__ == "__main__":
-    path = f'./data/before_migrt.json'
+    before_migrt_file = f'./data/before_migrt.json'
+    after_migrt_file = f'./data/after_migrt.json'
     full_traj_path = f'./data/all_traj.json'
-    inputs, targets, a_dim, s_dim =loadTrajChain(path,full_traj_path)
+
+    inputs, targets, a_dim, s_dim = loadTrajChain(before_migrt_file,full_traj_path)
+    print(inputs.shape,targets.shape,a_dim,s_dim)
     model = avril(inputs, targets, s_dim, a_dim, state_only=True) # initialization
 
     # NOTE: model train 
-    model.train(iters=50000)
-    model_save_path = f'./model/params.pickle'
-    model.modelSave(model_save_path)
+    # model.train(iters=5000)
+    # model_save_path = f'./model/params.pickle'
+    # model.modelSave(model_save_path)
 
     # NOTE: model reward before migration
-    computeRewardOrValue(model, './data/before_migrt_fnid.csv', './data/before_migrt_reward.csv', attribute_type='reward')
-    # computeRewardOrValue(model, './data/all_traj_fnid.csv', './data/all_traj_value.csv', attribute_type='value')
+    # computeRewardOrValue(model, './data/before_migrt_feature.csv', './data/before_migrt_reward.csv', attribute_type='reward')
+    # computeRewardOrValue(model, './data/before_migrt_feature.csv', './data/before_migrt_value.csv', attribute_type='value')
 
     # NOTE: mode parameters after migration per day
-    after_migrt_file = f'./data/after_migrt.json'
-    input_path = './data/all_traj_fnid.csv'
-    output_path = './data/after_migrt/after_migrt_reward.csv'
-    afterMigrt(after_migrt_file,input_path,output_path,model)
+    input_path = './data/all_traj_feature.csv'
+    output_path = './data/after_migrt_reward.csv'
+    afterMigrt(after_migrt_file,before_migrt_file,input_path,output_path,model)
