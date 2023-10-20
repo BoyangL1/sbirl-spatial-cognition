@@ -82,4 +82,4 @@ if __name__ == "__main__":
     path = f'./data/before_migrt.json'
     full_traj_path = f'./data/all_traj.json'
     inputs, targets, a_dim, s_dim =loadTrajChain(path,full_traj_path)
-    print(inputs,targets,a_dim,s_dim)
+    print(inputs.shape,targets.shape,a_dim,s_dim)
