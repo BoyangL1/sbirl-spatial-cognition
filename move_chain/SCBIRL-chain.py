@@ -190,7 +190,7 @@ class avril:
         """        
         mean, log_variance = self.reward(state) # mean and log variance
         sample_size=1
-        sample_reward = onp.random.normal(mean, onp.abs(np.exp(log_variance)), sample_size)
+        sample_reward = onp.random.normal(mean, np.exp(log_variance), sample_size)
         return sample_reward
 
     def QValue(self, state):
@@ -402,7 +402,8 @@ def getComputeFunction(model, attribute_type):
     if attribute_type == 'value':
         return lambda state: np.max(model.QValue(state))
     elif attribute_type == 'reward':
-        return lambda state: sum(np.abs(model.rewardValue(state)) for _ in range(10)) / 10
+        # return lambda state: sum(np.abs(model.rewardValue(state)) for _ in range(10)) / 10
+        return lambda state: model.reward(state)[0]
     else:
         raise ValueError("attribute_type should be either 'value' or 'reward'.")
 
@@ -452,27 +453,33 @@ def afterMigrt(after_migrt_file, before_migrt_file, input_path, output_path, mod
         
         pre_date = tc.date
     
-    results_df.to_csv(output_path)
+    results_df.to_csv(output_path,index=False)
 
 if __name__ == "__main__":
-    before_migrt_file = f'./data/before_migrt.json'
-    after_migrt_file = f'./data/after_migrt.json'
-    full_traj_path = f'./data/all_traj.json'
+    data_dir = './data/'
+    model_dir = './model/'
+    
+    # Paths for data files
+    before_migration_path = data_dir + 'before_migrt.json'
+    after_migration_path = data_dir + 'after_migrt.json'
+    full_trajectory_path = data_dir + 'all_traj.json'
+    
+    # Initialize the model
+    inputs, targets, action_dim, state_dim = loadTrajChain(before_migration_path, full_trajectory_path)
+    print(inputs.shape, targets.shape, action_dim, state_dim)
+    model = avril(inputs, targets, state_dim, action_dim, state_only=True)
 
-    inputs, targets, a_dim, s_dim = loadTrajChain(before_migrt_file,full_traj_path)
-    print(inputs.shape,targets.shape,a_dim,s_dim)
-    model = avril(inputs, targets, s_dim, a_dim, state_only=True) # initialization
-
-    # NOTE: model train 
-    # model.train(iters=5000)
-    # model_save_path = f'./model/params.pickle'
-    # model.modelSave(model_save_path)
-
-    # NOTE: model reward before migration
-    # computeRewardOrValue(model, './data/before_migrt_feature.csv', './data/before_migrt_reward.csv', attribute_type='reward')
-    # computeRewardOrValue(model, './data/before_migrt_feature.csv', './data/before_migrt_value.csv', attribute_type='value')
-
-    # NOTE: mode parameters after migration per day
-    input_path = './data/all_traj_feature.csv'
-    output_path = './data/after_migrt_reward.csv'
-    afterMigrt(after_migrt_file,before_migrt_file,input_path,output_path,model)
+    # NOTE: train the model
+    model.train(iters=50000)
+    model_save_path = model_dir + 'params.pickle'
+    model.modelSave(model_save_path)
+    
+    # NOTE: compute rewards and values before migration
+    feature_file = data_dir + 'before_migrt_feature.csv'
+    computeRewardOrValue(model, feature_file, data_dir + 'before_migrt_reward.csv', attribute_type='reward')
+    # computeRewardOrValue(model, feature_file, data_dir + 'before_migrt_value.csv', attribute_type='value')
+    
+    # NOTE: Compute rewards after migration
+    feature_file_all = data_dir + 'all_traj_feature.csv'
+    output_reward_path = data_dir + 'after_migrt_reward.csv'
+    afterMigrt(after_migration_path, before_migration_path, feature_file_all, output_reward_path, model)
