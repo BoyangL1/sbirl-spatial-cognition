@@ -202,7 +202,7 @@ class avril:
             self.decoder_layers,
             self.decoder_units,
         )
-        return state
+        return q_values
     
     def modelSave(self,model_save_path):
         with open(model_save_path,'wb') as f:
@@ -407,53 +407,78 @@ def getComputeFunction(model, attribute_type):
     else:
         raise ValueError("attribute_type should be either 'value' or 'reward'.")
 
-def afterMigrt(after_migrt_file, before_migrt_file, input_path, output_path, model):
+
+def readAndPrepareData(afterMigrtFile, beforeMigrtFile, inputPath):
+    beforeChains = loadJsonFile(beforeMigrtFile)
+    visitedState = {state for chain in beforeChains for state in chain['travel_chain']}
+    loadedDictsList1 = loadJsonFile(afterMigrtFile)
+    trajChains = loadTravelDataFromDicts(loadedDictsList1)
+    stateAttribute, _ = preprocessStateAttributes(afterMigrtFile, inputPath)
+    return visitedState, trajChains, stateAttribute
+
+def processBeforeMigrationData(stateAttribute, visitedState, computeFunc, idFnid, actionDim):
+    beforeMigrtTrans = []
+    for _, row in tqdm(stateAttribute.iterrows(), total=len(stateAttribute)):
+        fnid = row.values[0]
+        state = np.array(row.values[1:])
+        if fnid in visitedState:
+            actionProb = [0 if idFnid[i] not in visitedState else prob for i, prob in enumerate(computeFunc(state))]
+        else:
+            actionProb = [0 for _ in range(actionDim)]
+        resultRow = [fnid] + list(actionProb)
+        beforeMigrtTrans.append(resultRow)
+    columns = ['fnid'] + [idFnid[i] for i in range(actionDim)]
+    dfResults = pd.DataFrame(beforeMigrtTrans, columns=columns)
+    dfResults.to_csv(f"./data/before_migrt_transProb.csv", index=False)
+
+def processAfterMigrationData(tc, stateAttribute, model, visitedState, idFnid, actionDim):
+    stateNextState, actionNextAction = processTrajectoryData([tc], stateAttribute, model.s_dim)
+    visitedState.update(tc.travel_chain)
+    model.inputs = onp.array(stateNextState)
+    model.targets = onp.array(actionNextAction)
+    rewardFunction = getComputeFunction(model, 'reward')
+    computeFunc = lambda state: model.QValue(state)
+    rewardValues = []
+    results = []
+    for _, row in tqdm(stateAttribute.iterrows(), total=len(stateAttribute)):
+        fnid = row.values[0]
+        state = np.array(row.values[1:])
+        r = float(rewardFunction(state)) if fnid in visitedState else 0
+        rewardValues.append(r)
+        if fnid in visitedState:
+            actionProb = [0 if idFnid[i] not in visitedState else prob for i, prob in enumerate(computeFunc(state))]
+        else:
+            actionProb = [0 for _ in range(actionDim)]
+        resultRow = [fnid] + list(actionProb)
+        results.append(resultRow)
+    columns = ['fnid'] + [idFnid[i] for i in range(actionDim)]
+    dfResults = pd.DataFrame(results, columns=columns)
+    dfResults.to_csv(f"./data/after_migrt/transProb/{tc.date}.csv", index=False)
+    return rewardValues
+
+def afterMigrt(afterMigrtFile, beforeMigrtFile, inputPath, outputPath, model):
     model.loadParams('./model/params.pickle')
-    
-    # read before migration traj chain file using loadJsonFile
-    before_chains = loadJsonFile(before_migrt_file)
-    visited_state = {state for chain in before_chains for state in chain['travel_chain']}
-
-    # read after migration traj chain file using loadTravelDataFromDicts
-    loaded_dicts_list1 = loadJsonFile(after_migrt_file)
-    traj_chains = loadTravelDataFromDicts(loaded_dicts_list1)
-    
-    # Only keep the distance from home after migration
-    state_attribute, _ = preprocessStateAttributes(after_migrt_file,input_path)
-
-    results_df = pd.DataFrame()
-    results_df['fnid'] = state_attribute['fnid']
-    pre_date = 0
-
-    for tc in traj_chains:
-        state_next_state, action_next_action = processTrajectoryData([tc], state_attribute, model.s_dim)
-
-        visited_state.update(tc.travel_chain)
-
-        model.inputs = onp.array(state_next_state)
-        model.targets = onp.array(action_next_action)
-
-        if pre_date:
-            model_path = os.path.join("./data/after_migrt/model", f"{pre_date}.pickle")
-            model.loadParams(model_path)
+    with open("./data/id_fnid_mapping.pkl", "rb") as f:
+        idFnid = pickle.load(f)
+    computeFunc = lambda state: model.QValue(state)
+    actionDim = len(idFnid)
+    visitedState, trajChains, stateAttribute = readAndPrepareData(afterMigrtFile, beforeMigrtFile, inputPath)
+    processBeforeMigrationData(stateAttribute, visitedState, computeFunc, idFnid, actionDim)
+    resultsDf = pd.DataFrame()
+    resultsDf['fnid'] = stateAttribute['fnid']
+    preDate = 0
+    for tc in trajChains:
+        if preDate:
+            modelPath = os.path.join("./data/after_migrt/model", f"{preDate}.pickle")
+            model.loadParams(modelPath)
         model.train(iters=5000)
-        model_save_path = "./data/after_migrt/model/" + str(tc.date) + ".pickle"
-        model.modelSave(model_save_path)
+        modelSavePath = "./data/after_migrt/model/" + str(tc.date) + ".pickle"
+        model.modelSave(modelSavePath)
+        rewardValues = processAfterMigrationData(tc, stateAttribute, model, visitedState, idFnid, actionDim)
+        resultsDf[str(tc.date)] = rewardValues
+        preDate = tc.date
+    resultsDf.to_csv(outputPath, index=False)
 
-        reward_values = []
-        for _, row in tqdm(state_attribute.iterrows(), total=len(state_attribute)):
-            if row.fnid in visited_state:
-                state = np.array(row.values[1:])
-                r = float(getComputeFunction(model, 'reward')(state))
-                reward_values.append(r)
-            else:
-                reward_values.append(0)
-        results_df[str(tc.date)] = reward_values
-        print(reward_values)
-        
-        pre_date = tc.date
-    
-    results_df.to_csv(output_path,index=False)
 
 if __name__ == "__main__":
     data_dir = './data/'
@@ -470,13 +495,13 @@ if __name__ == "__main__":
     model = avril(inputs, targets, state_dim, action_dim, state_only=True)
 
     # NOTE: train the model
-    model.train(iters=50000)
-    model_save_path = model_dir + 'params.pickle'
-    model.modelSave(model_save_path)
+    # model.train(iters=50000)
+    # model_save_path = model_dir + 'params.pickle'
+    # model.modelSave(model_save_path)
     
     # NOTE: compute rewards and values before migration
-    feature_file = data_dir + 'before_migrt_feature.csv'
-    computeRewardOrValue(model, feature_file, data_dir + 'before_migrt_reward.csv', attribute_type='reward')
+    # feature_file = data_dir + 'before_migrt_feature.csv'
+    # computeRewardOrValue(model, feature_file, data_dir + 'before_migrt_value.csv', attribute_type='value')
     # computeRewardOrValue(model, feature_file, data_dir + 'before_migrt_value.csv', attribute_type='value')
     
     # NOTE: Compute rewards after migration
