@@ -384,5 +384,3 @@ if __name__ == "__main__":
     model.train(iters=50000)
 
     qvalue(model,pathGraph)
-
-
