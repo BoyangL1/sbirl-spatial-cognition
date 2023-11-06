@@ -21,7 +21,7 @@ def hidden_layers(layers=1, units=64):
     return hidden
 
 
-def encoder_model(inputs, layers=2, units=64, state_only=True, a_dim=None):
+def encoder_model(inputs, cost, layers=2, units=64, state_only=True, a_dim=None):
     """
     Create an encoder model for fitting posterior probabilities of a reward function.
 
@@ -39,6 +39,8 @@ def encoder_model(inputs, layers=2, units=64, state_only=True, a_dim=None):
     if not state_only:
         out_dim = a_dim * 2
     mlp = hk.Sequential(hidden_layers(layers) + [hk.Linear(out_dim)])
+    
+    inputs = np.concatenate([inputs, cost[..., None]], axis=-1)
     return mlp(inputs)
 
 
@@ -82,7 +84,7 @@ def kl_divergence(mean1, stddev1, mean2, stddev2):
 
 class avril:
     """
-    Class for implementing the AVRIL algorithm of Chan and van der Schaar (2021).
+    Class for implementing the AVRIL algorithm.
     This model is designed to be instantiated before calling the .train() method
     to fit to data.
     """
@@ -90,6 +92,7 @@ class avril:
     def __init__(
         self,
         inputs: np.array,
+        cost: np.array,
         targets: np.array,
         state_dim: int,
         action_dim: int,
@@ -105,7 +108,7 @@ class avril:
         ----------
 
         inputs: np.array
-            State training data of size [num_pairs x 2 x state_dimension]
+            State training data of size [num_pairs x 2 x state_dimension ]
         targets: np.array
             Action training data of size [num_pairs x 2 x 1]
         state_dim: int
@@ -133,6 +136,7 @@ class avril:
 
         self.inputs = inputs
         self.targets = targets
+        self.cost = cost
         self.s_dim = state_dim
         self.a_dim = action_dim
         self.state_only = state_only
@@ -142,7 +146,7 @@ class avril:
         self.decoder_units = decoder_units
 
         self.e_params = self.encoder.init(
-            self.key, inputs, encoder_layers, encoder_units, self.state_only, action_dim
+            self.key, inputs, cost, encoder_layers, encoder_units, self.state_only, action_dim
         )
         self.q_params = self.q_network.init(
             self.key, inputs, action_dim, decoder_layers, decoder_units
@@ -154,24 +158,13 @@ class avril:
         self.pre_params = None
         return
 
-    def predict(self, state):
-        #  Returns predicted action logits for a given state
-        logit = self.q_network.apply(
-            self.q_params,
-            self.key,
-            state,
-            self.a_dim,
-            self.decoder_layers,
-            self.decoder_units,
-        )
-        return logit
-
-    def reward(self, state):
+    def reward(self, state, cost):
         #  Returns reward function parameters for a given state
         r_par = self.encoder.apply(
             self.e_params,
             self.key,
             state,
+            cost,
             self.encoder_layers,
             self.encoder_units,
             self.state_only,
@@ -179,7 +172,7 @@ class avril:
         )
         return r_par
 
-    def rewardValue(self,state):
+    def rewardValue(self,state,cost):
         """
             return the given reward of a given state
         Args:
@@ -188,12 +181,13 @@ class avril:
         Returns:
             (int): reward value
         """        
-        mean, log_variance = self.reward(state) # mean and log variance
+        mean, log_variance = self.reward(state,cost) # mean and log variance
         sample_size=1
         sample_reward = onp.random.normal(mean, np.exp(log_variance), sample_size)
         return sample_reward
 
     def QValue(self, state):
+        #  Returns predicted action logits for a given state
         q_values = self.q_network.apply(
             self.q_params,
             self.key,
@@ -209,7 +203,7 @@ class avril:
             print("save params to {}!".format(model_save_path))
             pickle.dump(self.params, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-    def elbo(self, params, key, inputs, targets):
+    def elbo(self, params, key, inputs, cost, targets):
         """
         Method for calculating ELBO
 
@@ -267,6 +261,7 @@ class avril:
                 encoder_params,
                 key,
                 inputs[:, 0, :],
+                cost[:,0],
                 self.encoder_layers,
                 self.encoder_units,
                 self.state_only,
@@ -329,6 +324,7 @@ class avril:
 
         inputs = self.inputs
         targets = self.targets
+        cost = self.cost
 
         init_fun, update_fun, get_params = optimizers.adam(l_rate)
         update_fun = jit(update_fun)
@@ -357,7 +353,7 @@ class avril:
 
             key, subkey = random.split(key)
 
-            lik, g_params = loss_grad(params, key, inputs[indxes], targets[indxes])
+            lik, g_params = loss_grad(params, key, inputs[indxes], cost[indxes], targets[indxes])
 
             param_state = update_fun(itr, g_params, param_state)
 
@@ -380,10 +376,11 @@ def computeRewardOrValue(model, input_path, output_path, attribute_type='value')
     Returns:
     None. Writes results to the specified output CSV file.
     """
-    
+    model.loadParams('./model/params.pickle')
     # Using preprocessing function from utils
     state_attribute, _ = preprocessStateAttributes('./data/before_migrt.json',input_path)
-
+    cost_attribute = pd.Series(0, index=np.arange(state_attribute.shape[0]))
+    state_attribute = state_attribute.iloc[:,:-1]
     # Add a column for attribute_type
     state_attribute[attribute_type] = 0.0
 
@@ -391,7 +388,11 @@ def computeRewardOrValue(model, input_path, output_path, attribute_type='value')
     
     for index, row in tqdm(state_attribute.iterrows(), total=len(state_attribute)):
         state = np.array(row.values[1:-1])
-        state_attribute.iloc[index, -1] = float(computeFunc(state))
+        cost = np.array(cost_attribute.iloc[index])
+        if attribute_type == 'reward':
+            state_attribute.iloc[index, -1] = float(computeFunc(state,cost))
+        else:
+            state_attribute.iloc[index, -1] = float(computeFunc(state))
         
     if output_path is not None:
         state_attribute.to_csv(output_path, index=False)
@@ -403,7 +404,7 @@ def getComputeFunction(model, attribute_type):
         return lambda state: np.max(model.QValue(state))
     elif attribute_type == 'reward':
         # return lambda state: sum(np.abs(model.rewardValue(state)) for _ in range(10)) / 10
-        return lambda state: model.reward(state)[0]
+        return lambda state,cost: model.reward(state,cost)[0]
     else:
         raise ValueError("attribute_type should be either 'value' or 'reward'.")
 
@@ -420,7 +421,7 @@ def processBeforeMigrationData(stateAttribute, visitedState, computeFunc, idFnid
     beforeMigrtTrans = []
     for _, row in tqdm(stateAttribute.iterrows(), total=len(stateAttribute)):
         fnid = row.values[0]
-        state = np.array(row.values[1:])
+        state = np.array(row.values[1:-1])
         if fnid in visitedState:
             actionProb = [0 if idFnid[i] not in visitedState else prob for i, prob in enumerate(computeFunc(state))]
         else:
@@ -434,16 +435,21 @@ def processBeforeMigrationData(stateAttribute, visitedState, computeFunc, idFnid
 def processAfterMigrationData(tc, stateAttribute, model, visitedState, idFnid, actionDim):
     stateNextState, actionNextAction = processTrajectoryData([tc], stateAttribute, model.s_dim)
     visitedState.update(tc.travel_chain)
-    model.inputs = onp.array(stateNextState)
+    # update model inputs and targets
+    model.inputs = onp.array(stateNextState[:,:,:-1])
     model.targets = onp.array(actionNextAction)
+    # get reward function per day
     rewardFunction = getComputeFunction(model, 'reward')
+    cost_attribute = pd.Series(0, index=np.arange(stateAttribute.shape[0]))
     computeFunc = lambda state: model.QValue(state)
     rewardValues = []
     results = []
-    for _, row in tqdm(stateAttribute.iterrows(), total=len(stateAttribute)):
+
+    for index, row in tqdm(stateAttribute.iterrows(), total=len(stateAttribute)):
         fnid = row.values[0]
-        state = np.array(row.values[1:])
-        r = float(rewardFunction(state)) if fnid in visitedState else 0
+        state = np.array(row.values[1:-1])
+        cost = np.array(cost_attribute.iloc[index])
+        r = float(rewardFunction(state,cost)) if fnid in visitedState else 0
         rewardValues.append(r)
         if fnid in visitedState:
             actionProb = [0 if idFnid[i] not in visitedState else prob for i, prob in enumerate(computeFunc(state))]
@@ -490,18 +496,19 @@ if __name__ == "__main__":
     full_trajectory_path = data_dir + 'all_traj.json'
     
     # Initialize the model
-    inputs, targets, action_dim, state_dim = loadTrajChain(before_migration_path, full_trajectory_path)
-    print(inputs.shape, targets.shape, action_dim, state_dim)
-    model = avril(inputs, targets, state_dim, action_dim, state_only=True)
+    inputs, cost, targets, action_dim, state_dim = loadTrajChain(before_migration_path, full_trajectory_path)
+    print(inputs.shape,cost.shape)
+    model = avril(inputs, cost, targets, state_dim, action_dim, state_only=True)
 
     # NOTE: train the model
-    # model.train(iters=50000)
-    # model_save_path = model_dir + 'params.pickle'
-    # model.modelSave(model_save_path)
+    model.train(iters=50000)
+    model_save_path = model_dir + 'params.pickle'
+    model.modelSave(model_save_path)
     
+     
     # NOTE: compute rewards and values before migration
     # feature_file = data_dir + 'before_migrt_feature.csv'
-    # computeRewardOrValue(model, feature_file, data_dir + 'before_migrt_value.csv', attribute_type='value')
+    # computeRewardOrValue(model, feature_file, data_dir + 'before_migrt_reward.csv', attribute_type='reward')
     # computeRewardOrValue(model, feature_file, data_dir + 'before_migrt_value.csv', attribute_type='value')
     
     # NOTE: Compute rewards after migration

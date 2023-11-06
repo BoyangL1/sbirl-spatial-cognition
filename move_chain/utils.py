@@ -6,7 +6,7 @@ import json
 from collections import namedtuple
 from sklearn.preprocessing import MinMaxScaler
 
-TravelData = namedtuple('TravelChain', ['date', 'travel_chain','id_chain'])
+TravelData = namedtuple('TravelChain', ['date', 'travel_chain','id_chain','cost'])
 
 def loadJsonFile(file_path):
     with open(file_path, 'r') as file:
@@ -76,10 +76,11 @@ def loadTrajChain(traj_file, full_traj_path, num_trajs=None):
     state_attribute, s_dim = preprocessStateAttributes(traj_file)
     state_next_state, action_next_action = processTrajectoryData(traj_chains, state_attribute, s_dim)
 
-    return state_next_state, action_next_action, a_dim, s_dim
+    return state_next_state[:,:,:-1], state_next_state[:,:,-1], action_next_action, a_dim, s_dim
     
 if __name__ == "__main__":
     path = f'./data/before_migrt.json'
     full_traj_path = f'./data/all_traj.json'
-    inputs, targets, a_dim, s_dim =loadTrajChain(path,full_traj_path)
-    print(inputs.shape,targets.shape,a_dim,s_dim)
+    inputs, cost, targets, a_dim, s_dim =loadTrajChain(path,full_traj_path)
+    # print(inputs.shape,targets.shape,a_dim,s_dim)
+    print(inputs.shape, cost.shape)
